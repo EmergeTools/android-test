@@ -65,4 +65,3 @@ jobs:
         path: |
           apk-outputs/android-test-orchestrator.apk
           apk-outputs/android-test-services.apk
-        retention-days: 30
