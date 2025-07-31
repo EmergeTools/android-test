@@ -59,7 +59,7 @@ public class TestRunnableTest {
         RunFinishedListener listener,
         String test,
         boolean collectTests) {
-      super(context, secret, arguments, outputStream, listener, test, collectTests);
+      super(context, secret, arguments, outputStream, listener, test, null, collectTests);
     }
 
     @Override
