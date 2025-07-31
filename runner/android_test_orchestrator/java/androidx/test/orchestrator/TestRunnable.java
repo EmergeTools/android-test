@@ -45,27 +45,10 @@ public class TestRunnable implements Runnable {
   private final RunFinishedListener listener;
   private final OutputStream outputStream;
   private final String test;
+  private final String testFilePath;
   private final boolean collectTests;
   private final Context context;
   private final String secret;
-
-  /**
-   * Constructs a TestRunnable executes all tests in arguments.
-   *
-   * @param context A context
-   * @param secret A string representing the speakeasy binder key
-   * @param arguments contains arguments to be passed to the target instrumentation
-   * @param outputStream the stream to write the results of the test process
-   * @param listener a callback listener to know when the run has completed
-   */
-  public static TestRunnable legacyTestRunnable(
-      Context context,
-      String secret,
-      Bundle arguments,
-      OutputStream outputStream,
-      RunFinishedListener listener) {
-    return new TestRunnable(context, secret, arguments, outputStream, listener, null, false);
-  }
 
   /**
    * Constructs a TestRunnable which will run a single test.
@@ -85,7 +68,7 @@ public class TestRunnable implements Runnable {
       OutputStream outputStream,
       RunFinishedListener listener,
       String test) {
-    return new TestRunnable(context, secret, arguments, outputStream, listener, test, false);
+    return new TestRunnable(context, secret, arguments, outputStream, listener, test, null, false);
   }
 
   /**
@@ -103,7 +86,27 @@ public class TestRunnable implements Runnable {
       Bundle arguments,
       OutputStream outputStream,
       RunFinishedListener listener) {
-    return new TestRunnable(context, secret, arguments, outputStream, listener, null, true);
+    return new TestRunnable(context, secret, arguments, outputStream, listener, null, null, true);
+  }
+
+  /**
+   * Constructs a TestRunnable which will run a specific subset of tests from a file.
+   *
+   * @param context A context
+   * @param secret A string representing the speakeasy binder key
+   * @param arguments contains arguments to be passed to the target instrumentation
+   * @param outputStream the stream to write the results of the test process
+   * @param listener a callback listener to know when the run has completed
+   * @param testFilePath the path to a file containing the tests to run
+   */
+  public static TestRunnable testSubsetRunnable(
+      Context context,
+      String secret,
+      Bundle arguments,
+      OutputStream outputStream,
+      RunFinishedListener listener,
+      String testFilePath) {
+    return new TestRunnable(context, secret, arguments, outputStream, listener, null, testFilePath, false);
   }
 
   @VisibleForTesting
@@ -114,6 +117,7 @@ public class TestRunnable implements Runnable {
       OutputStream outputStream,
       RunFinishedListener listener,
       String test,
+      String testFilePath,
       boolean collectTests) {
     this.context = context;
     this.secret = secret;
@@ -121,6 +125,7 @@ public class TestRunnable implements Runnable {
     this.outputStream = outputStream;
     this.listener = listener;
     this.test = test;
+    this.testFilePath = testFilePath;
     this.collectTests = collectTests;
   }
 
@@ -178,9 +183,12 @@ public class TestRunnable implements Runnable {
       targetArgs.remove("testFile");
     }
 
-    // Override the class parameter with the current test target.
+    // Override the class parameter with the current test target or use testFile for test subset.
     if (test != null) {
       targetArgs.putString(AJUR_CLASS_ARGUMENT, test);
+    } else if (testFilePath != null && !testFilePath.isEmpty()) {
+      // For test subset, use testFile parameter to read tests from file
+      targetArgs.putString("testFile", testFilePath);
     }
 
     return targetArgs;

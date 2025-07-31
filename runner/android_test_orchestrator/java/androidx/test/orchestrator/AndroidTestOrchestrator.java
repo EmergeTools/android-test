@@ -40,26 +40,37 @@ import android.content.pm.PackageManager.NameNotFoundException;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Debug;
+import android.os.Environment;
 import android.os.IBinder;
 import android.os.RemoteException;
 import android.text.TextUtils;
 import android.util.Log;
+
 import androidx.annotation.VisibleForTesting;
 import androidx.core.content.ContextCompat;
 import androidx.test.orchestrator.TestRunnable.RunFinishedListener;
 import androidx.test.orchestrator.junit.ParcelableDescription;
+import androidx.test.orchestrator.junit.ParcelableFailure;
 import androidx.test.orchestrator.listeners.OrchestrationListenerManager;
 import androidx.test.orchestrator.listeners.OrchestrationResult;
 import androidx.test.orchestrator.listeners.OrchestrationResultPrinter;
+import androidx.test.orchestrator.listeners.OrchestrationRunListener;
 import androidx.test.services.shellexecutor.ClientNotConnected;
 import androidx.test.services.shellexecutor.ShellExecSharedConstants;
 import androidx.test.services.shellexecutor.ShellExecutor;
 import androidx.test.services.shellexecutor.ShellExecutorFactory;
+
+import java.io.BufferedWriter;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.OutputStreamWriter;
 import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -127,6 +138,27 @@ import java.util.regex.Pattern;
 public final class AndroidTestOrchestrator extends android.app.Instrumentation
     implements RunFinishedListener {
 
+  private class OrchestratorListener extends OrchestrationRunListener {
+    @Override
+    public void testStarted(ParcelableDescription description) {
+      if (!runsInIsolatedMode(arguments)) {
+        test = description.getClassName() + "#" + description.getMethodName();
+        testsToExecuteNoIsolation.remove(test);
+      }
+    }
+
+    @Override
+    public void testFailure(ParcelableFailure failure) {
+        isRecoveringFromCrash = true;
+    }
+
+    @Override
+    public void testProcessFinished(String message) {
+      super.testProcessFinished(message);
+      Log.i(TAG, "Test process finished: " + message);
+    }
+  }
+
   private static final String TAG = "AndroidTestOrchestrator";
   // As defined in the AndroidManifest of the Orchestrator app.
   private static final String ORCHESTRATOR_SERVICE_LOCATION = "OrchestratorService";
@@ -145,6 +177,7 @@ public final class AndroidTestOrchestrator extends android.app.Instrumentation
   private final OrchestrationResultPrinter resultPrinter = new OrchestrationResultPrinter();
   private final OrchestrationListenerManager listenerManager =
       new OrchestrationListenerManager(this);
+  private final OrchestratorListener orchestratorListener = new OrchestratorListener();
 
   private final ExecutorService executorService;
 
@@ -157,6 +190,9 @@ public final class AndroidTestOrchestrator extends android.app.Instrumentation
   // instrumentation, it should live in its own state machine class.
   private String test;
   private Iterator<String> testIterator;
+
+  private List<String> testsToExecuteNoIsolation;
+  private boolean isRecoveringFromCrash = false;
 
   public AndroidTestOrchestrator() {
     super();
@@ -315,6 +351,7 @@ public final class AndroidTestOrchestrator extends android.app.Instrumentation
     if (null == test) {
       List<String> allTests = callbackLogic.provideCollectedTests();
       testIterator = allTests.iterator();
+      testsToExecuteNoIsolation = new ArrayList<>(allTests);
       addListeners(allTests.size());
 
       if (allTests.isEmpty()) {
@@ -333,17 +370,76 @@ public final class AndroidTestOrchestrator extends android.app.Instrumentation
   }
 
   private void executeEntireTestSuite() {
+    Log.i(TAG, "Executing entire test suite...");
+    // If we're recovering from a crash, continue with remaining tests
+    if (isRecoveringFromCrash && testsToExecuteNoIsolation != null && !testsToExecuteNoIsolation.isEmpty()) {
+      isRecoveringFromCrash = false;
+      executeRemainingTests();
+      return;
+    }
+    
     if (null != test) {
       finish(Activity.RESULT_OK, createResultBundle());
       return;
     }
 
-    // We don't actually need test to have any particular value,
-    // just to indicate we've started execution.
+    executeRemainingTests();
+  }
+
+  private void executeRemainingTests() {
+    Log.i(TAG, "Executing remaining tests...");
+    // Create a list of remaining tests from the current iterator position
+    List<String> remainingTests = new ArrayList<>(testsToExecuteNoIsolation);
+    
+    if (remainingTests.isEmpty()) {
+      Log.i(TAG, "No remaining tests to execute.");
+      finish(Activity.RESULT_OK, createResultBundle());
+      return;
+    }
+    
+    // Set test to indicate execution has started
     test = "";
+    // Execute remaining tests using a subset TestRunnable, we need to prevent the argument list from being too long
+    // Run 500 tests at a time
+    Log.i(TAG, "Executing subset of remaining tests: " + remainingTests.size() + " tests.");
+    
+    // Write tests to file to avoid argument length limits
+    String testFilePath = writeTestsToFile(remainingTests);
+    Log.i(TAG, "Test file path: " + testFilePath);
+    
     executorService.execute(
-        TestRunnable.legacyTestRunnable(
-            getContext(), getSecret(arguments), arguments, getOutputStream(), this));
+            TestRunnable.testSubsetRunnable(
+                    getContext(), getSecret(arguments), arguments, getOutputStream(), this, testFilePath));
+  }
+
+  private String writeTestsToFile(List<String> tests) {
+    String fileName = "test_subset.txt";
+    String filePath = "/data/local/tmp/" + fileName;
+    Context context = getContext();
+    String secret = getSecret(arguments);
+    
+    try {
+      // Create the file using shell command to ensure proper permissions
+      execShellCommandSync(context, secret, "touch", Arrays.asList(filePath));
+      
+      // Make the file world readable/writable so both processes can access it
+      execShellCommandSync(context, secret, "chmod", Arrays.asList("666", filePath));
+      
+      // Write the test content to the file using shell commands
+      StringBuilder content = new StringBuilder();
+      for (String test : tests) {
+        content.append(test).append("\n");
+      }
+      
+      // Use echo to write content (escape any special characters)
+      String escapedContent = content.toString().replace("\"", "\\\"").replace("$", "\\$");
+      execShellCommandSync(context, secret, "sh", Arrays.asList("-c", "echo \"" + escapedContent + "\" > " + filePath));
+      
+      return filePath;
+    } catch (Exception e) {
+      Log.e(TAG, "Failed to write tests to file using shell commands", e);
+      throw new RuntimeException("Could not write tests to file", e);
+    }
   }
 
   private void executeNextTest() {
@@ -434,6 +530,7 @@ public final class AndroidTestOrchestrator extends android.app.Instrumentation
   private void addListeners(int testSize) {
     listenerManager.addListener(resultBuilder);
     listenerManager.addListener(resultPrinter);
+    listenerManager.addListener(orchestratorListener);
     listenerManager.orchestrationRunStarted(testSize);
   }
 
