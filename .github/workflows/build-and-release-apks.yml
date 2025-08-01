@@ -1,0 +1,67 @@
+name: Build and Release APKs
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: Setup Bazel
+      uses: bazel-contrib/setup-bazel@0.8.5
+      with:
+        bazelisk-cache: true
+        disk-cache: ${{ github.workflow }}
+        repository-cache: true
+
+    - name: Build AndroidX Test m2repository
+      run: |
+        bazel build :axt_m2repository
+
+    - name: Extract APKs from m2repository
+      run: |
+        unzip -o bazel-bin/axt_m2repository.zip -d extracted/
+
+    - name: Create output directory
+      run: mkdir -p apk-outputs
+
+    - name: Copy APKs to output directory
+      run: |
+        # Copy test services APK
+        cp extracted/repository/androidx/test/services/test-services/1.7.0-alpha01/test-services-1.7.0-alpha01.apk apk-outputs/android-test-services.apk
+        
+        # Copy orchestrator APK
+        cp extracted/repository/androidx/test/orchestrator/1.7.0-alpha01/orchestrator-1.7.0-alpha01.apk apk-outputs/android-test-orchestrator.apk
+        
+        ls -la apk-outputs/
+
+    - name: Upload APKs to Release
+      if: github.event_name == 'release'
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          apk-outputs/android-test-orchestrator.apk
+          apk-outputs/android-test-services.apk
+      env:
+        GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+
+    - name: Upload APKs as Artifacts (for workflow_dispatch)
+      if: github.event_name == 'workflow_dispatch'
+      uses: actions/upload-artifact@v4
+      with:
+        name: android-test-apks
+        path: |
+          apk-outputs/android-test-orchestrator.apk
+          apk-outputs/android-test-services.apk
